@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ảnh sang văn bản</title>
+<style>
+:root{--bg:#eef2f1;--panel:#fff;--ink:#16302b;--muted:#5d746f;--line:#cdd9d6;--accent:#0f6b5c;--accent-ink:#fff;--warn:#a4452c;--mark:#e3f1ee}
+@media (prefers-color-scheme:dark){:root{--bg:#10201d;--panel:#172a26;--ink:#e4f0ed;--muted:#93aca6;--line:#2b4640;--accent:#4cc2ac;--accent-ink:#0a1f1b;--warn:#f08a6c;--mark:#1f3a34}}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:16px/1.55 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;padding:24px 16px 48px}
+main{max-width:1000px;margin:0 auto}
+h1{font-size:1.7rem;margin:0 0 4px}
+.sub{color:var(--muted);margin:0 0 20px;max-width:62ch}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+.panel h2{font-size:1rem;margin:0 0 12px}
+.drop{position:relative;border:2px dashed var(--line);border-radius:8px;min-height:260px;display:flex;align-items:center;justify-content:center;text-align:center;padding:12px;color:var(--muted);transition:background .15s,border-color .15s}
+.drop.over,.drop:focus-within{background:var(--mark);border-color:var(--accent)}
+.drop input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+.drop img{max-width:100%;max-height:340px;border-radius:6px;display:block}
+.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:12px}
+select,button{font:inherit;border-radius:8px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:8px 12px;cursor:pointer}
+button:disabled{opacity:.5;cursor:not-allowed}
+button:focus-visible,select:focus-visible,.drop input:focus-visible+span{outline:3px solid var(--accent);outline-offset:2px}
+progress{width:100%;height:10px;accent-color:var(--accent);margin-top:12px;display:none}
+#status{color:var(--muted);font-size:.9rem;margin-top:8px;min-height:1.4em}
+#status.err{color:var(--warn)}
+textarea{width:100%;min-height:300px;resize:vertical;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;padding:12px}
+textarea:focus-visible{outline:3px solid var(--accent);outline-offset:1px}
+.meta{color:var(--muted);font-size:.85rem;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+  <h1>Ảnh sang văn bản</h1>
+  <p class="sub">Chọn ảnh, web tự phát hiện chữ và ngôn ngữ rồi trích xuất ngay. Ảnh được xử lý trên máy bạn, không gửi đi đâu.</p>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Ảnh nguồn</h2>
+      <div class="drop" id="drop">
+        <input type="file" id="file" accept="image/*" aria-label="Chọn ảnh">
+        <span id="hint">Bấm để chọn ảnh, kéo thả vào đây, hoặc dán ảnh bằng Ctrl+V</span>
+      </div>
+      <div class="row">
+        <label for="lang">Ngôn ngữ</label>
+        <select id="lang">
+          <option value="auto" selected>Tự động phát hiện</option>
+          <option value="vie+eng">Tiếng Việt + Anh</option>
+          <option value="eng">Tiếng Anh</option>
+          <option value="chi_sim+eng">Tiếng Trung (giản thể)</option>
+          <option value="jpn+eng">Tiếng Nhật</option>
+          <option value="kor+eng">Tiếng Hàn</option>
+        </select>
+        <button id="redo" disabled>Nhận dạng lại</button>
+        <button id="clear" disabled>Xóa ảnh</button>
+      </div>
+      <progress id="bar" max="1" value="0"></progress>
+      <div id="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Văn bản trích xuất</h2>
+      <textarea id="out" placeholder="Kết quả sẽ hiện ở đây. Bạn có thể sửa trực tiếp." aria-label="Văn bản trích xuất"></textarea>
+      <div class="row">
+        <button id="copy" disabled>Sao chép</button>
+        <button id="save" disabled>Tải về .txt</button>
+      </div>
+      <div class="meta" id="meta"></div>
+    </section>
+  </div>
+</main>
+
+<script>
+(function(){
+  const $=id=>document.getElementById(id);
+  const drop=$('drop'),fileIn=$('file'),redo=$('redo'),clr=$('clear'),bar=$('bar'),
+        statusEl=$('status'),out=$('out'),copyB=$('copy'),saveB=$('save'),meta=$('meta'),lang=$('lang');
+  const LANG_NAMES={'vie+eng':'Tiếng Việt/Anh','eng':'Tiếng Anh','chi_sim+eng':'Tiếng Trung','jpn+eng':'Tiếng Nhật','kor+eng':'Tiếng Hàn'};
+  const AUTO_ORDER=['vie+eng','chi_sim+eng','jpn+eng','kor+eng'];
+  let canvas=null,previewUrl=null,busy=false,runId=0;
+
+  function setStatus(t,err){statusEl.textContent=t;statusEl.className=err?'err':'';}
+
+  /* Tải thư viện OCR, thử lần lượt nhiều CDN */
+  const LIBS=[
+    'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js',
+    'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js',
+    'https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js'
+  ];
+  let libPromise=null;
+  function loadLib(){
+    if(window.Tesseract)return Promise.resolve();
+    if(libPromise)return libPromise;
+    libPromise=LIBS.reduce((p,src)=>p.catch(()=>new Promise((res,rej)=>{
+      const s=document.createElement('script');s.src=src;
+      s.onload=()=>window.Tesseract?res():rej();
+      s.onerror=()=>{s.remove();rej();};
+      document.head.appendChild(s);
+    })),Promise.reject()).catch(()=>{libPromise=null;throw new Error('lib');});
+    return libPromise;
+  }
+  loadLib().catch(()=>{}); // tải sẵn trong lúc chờ người dùng chọn ảnh
+
+  /* Đọc ảnh an toàn: giải mã, thu nhỏ/phóng to vừa phải, vẽ lên canvas */
+  function decode(file){
+    return new Promise((res,rej)=>{
+      const u=URL.createObjectURL(file);
+      const img=new Image();
+      img.onload=()=>res({img,u});
+      img.onerror=()=>{URL.revokeObjectURL(u);rej(new Error('decode'));};
+      img.src=u;
+    });
+  }
+  function toCanvas(img){
+    let w=img.naturalWidth||img.width,h=img.naturalHeight||img.height;
+    if(!w||!h)throw new Error('decode');
+    const MAX=2600,MIN=1000;
+    let k=1;
+    if(Math.max(w,h)>MAX)k=MAX/Math.max(w,h);
+    else if(Math.max(w,h)<MIN)k=Math.min(3,MIN/Math.max(w,h));
+    const c=document.createElement('canvas');
+    c.width=Math.round(w*k);c.height=Math.round(h*k);
+    const g=c.getContext('2d');
+    g.fillStyle='#fff';g.fillRect(0,0,c.width,c.height); // nền trắng cho ảnh PNG trong suốt
+    g.drawImage(img,0,0,c.width,c.height);
+    return c;
+  }
+
+  async function load(file){
+    if(!file)return;
+    if(file.type&&!file.type.startsWith('image/')){setStatus('Tệp này không phải ảnh. Hãy chọn PNG, JPG, WEBP hoặc BMP.',true);return;}
+    setStatus('Đang đọc ảnh...');
+    try{
+      const {img,u}=await decode(file);
+      canvas=toCanvas(img);
+      if(previewUrl)URL.revokeObjectURL(previewUrl);
+      previewUrl=u;
+      drop.querySelectorAll('img').forEach(i=>i.remove());
+      $('hint').style.display='none';
+      const p=new Image();p.src=u;p.alt='Ảnh đã chọn';
+      drop.appendChild(p);
+      clr.disabled=false;
+      recognize(); // tự động nhận dạng ngay sau khi tải ảnh
+    }catch(e){
+      setStatus('Không đọc được ảnh này. Nếu là ảnh HEIC của iPhone hoặc tệp bị hỏng, hãy chuyển sang JPG/PNG rồi thử lại.',true);
+    }finally{fileIn.value='';}
+  }
+
+  async function ocr(lg,id,from,span){
+    const res=await Tesseract.recognize(canvas,lg,{logger:m=>{
+      if(id!==runId)return;
+      if(m.status==='recognizing text'){
+        bar.value=from+m.progress*span;
+        setStatus('Đang nhận dạng ('+(LANG_NAMES[lg]||lg)+'): '+Math.round(m.progress*100)+'%');
+      }else if(m.status){setStatus('Đang chuẩn bị ('+(LANG_NAMES[lg]||lg)+')...');}
+    }});
+    return {lg,text:res.data.text.trim(),conf:res.data.confidence};
+  }
+
+  async function recognize(){
+    if(!canvas||busy)return;
+    busy=true;const id=++runId;
+    redo.disabled=true;copyB.disabled=saveB.disabled=true;
+    out.value='';meta.textContent='';bar.style.display='block';bar.value=0;
+    const t0=performance.now();
+    try{
+      setStatus('Đang tải bộ nhận dạng...');
+      await loadLib();
+      const sel=lang.value;
+      let best=null;
+      if(sel!=='auto'){
+        best=await ocr(sel,id,0,1);
+      }else{
+        const n=AUTO_ORDER.length;
+        for(let i=0;i<n;i++){
+          const r=await ocr(AUTO_ORDER[i],id,i/n,1/n);
+          const score=r.text.length>0?r.conf:0;
+          if(!best||score>best.score){best={...r,score};}
+          if(score>=75)break; // đủ tin cậy, không cần thử thêm
+        }
+      }
+      out.value=best.text;
+      const has=best.text.length>0;
+      copyB.disabled=saveB.disabled=!has;
+      const sec=((performance.now()-t0)/1000).toFixed(1);
+      if(has){
+        meta.textContent='Ngôn ngữ phát hiện: '+(LANG_NAMES[best.lg]||best.lg)+' · độ tin cậy '+Math.round(best.conf)+'% · '+best.text.split(/\s+/).length+' từ · '+sec+' giây';
+        setStatus('Hoàn tất.');
+      }else{
+        setStatus('Không tìm thấy chữ trong ảnh. Thử ảnh rõ nét, đủ sáng, chữ không bị nghiêng nhiều.',true);
+      }
+    }catch(e){
+      if(e&&e.message==='lib')setStatus('Không tải được thư viện nhận dạng. Hãy kiểm tra Internet rồi bấm “Nhận dạng lại”.',true);
+      else setStatus('Lỗi khi nhận dạng: '+(e&&e.message?e.message:e)+'. Bấm “Nhận dạng lại” để thử lần nữa.',true);
+    }finally{
+      busy=false;bar.style.display='none';redo.disabled=!canvas;
+    }
+  }
+
+  fileIn.addEventListener('change',()=>load(fileIn.files&&fileIn.files[0]));
+  ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
+  ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
+  drop.addEventListener('drop',e=>{const f=[...(e.dataTransfer.files||[])].find(x=>x.type.startsWith('image/'))||e.dataTransfer.files[0];load(f);});
+  document.addEventListener('paste',e=>{
+    const it=[...(e.clipboardData?e.clipboardData.items:[])].find(i=>i.type.startsWith('image/'));
+    if(it)load(it.getAsFile());
+  });
+  redo.addEventListener('click',recognize);
+  lang.addEventListener('change',()=>{if(canvas&&!busy)recognize();});
+  clr.addEventListener('click',()=>{
+    runId++;canvas=null;if(previewUrl)URL.revokeObjectURL(previewUrl);previewUrl=null;
+    drop.querySelectorAll('img').forEach(i=>i.remove());$('hint').style.display='';
+    out.value='';meta.textContent='';setStatus('');
+    redo.disabled=clr.disabled=copyB.disabled=saveB.disabled=true;
+  });
+  out.addEventListener('input',()=>{copyB.disabled=saveB.disabled=!out.value.trim();});
+  copyB.addEventListener('click',async()=>{
+    try{await navigator.clipboard.writeText(out.value);}catch(e){out.select();document.execCommand('copy');}
+    setStatus('Đã sao chép vào bộ nhớ tạm.');
+  });
+  saveB.addEventListener('click',()=>{
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([out.value],{type:'text/plain;charset=utf-8'}));
+    a.download='van-ban-trich-xuat.txt';document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  });
+})();
+</script>
+</body>
+</html>
